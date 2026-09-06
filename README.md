@@ -13,7 +13,7 @@
 - **📦 灵活规则**：支持紧凑/分散排座，可自定义排除特定损坏座位（如坏电脑）。
 
 ## 🚀 快速开始 (Quick Start)
-1. 克隆本项目：`git clone https://github.com/你的用户名/Smart-Seat-Shuffler.git`
+1. 克隆本项目：`git clone https://github.com/caizeming/Smart-Seat-Shuffler.git`
 2. 安装依赖：`pip install -r requirements.txt`
 3. 运行程序：`python seat_shuffler.py`
 
