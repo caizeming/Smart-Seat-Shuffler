@@ -1,3 +1,4 @@
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
@@ -8,11 +9,44 @@ import json
 import shutil
 import logging
 import threading
+from collections import deque
 from datetime import datetime
 import openpyxl
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from tkinterdnd2 import DND_FILES, TkinterDnD
+
+# ==================== 设计系统 Design Tokens ====================
+# 所有颜色均为 (浅色模式, 深色模式) 元组
+PALETTE = {
+    "bg":           ("#F1F5F9", "#0F172A"),
+    "sidebar":      ("#FFFFFF", "#1E293B"),
+    "card":         ("#FFFFFF", "#1E293B"),
+    "card_soft":    ("#F8FAFC", "#16203A"),
+    "border":       ("#E2E8F0", "#334155"),
+    "text":         ("#0F172A", "#F1F5F9"),
+    "text_2":       ("#475569", "#94A3B8"),
+    "text_3":       ("#94A3B8", "#64748B"),
+    "primary":      ("#3B82F6", "#3B82F6"),
+    "primary_hv":   ("#2563EB", "#2563EB"),
+    "primary_soft": ("#EFF6FF", "#1E3A5F"),
+    "success":      ("#10B981", "#10B981"),
+    "success_hv":   ("#059669", "#059669"),
+    "warn":         ("#D97706", "#F59E0B"),
+    "danger":       ("#EF4444", "#F87171"),
+    "danger_soft":  ("#FEF2F2", "#431818"),
+    "row_fg":       ("#334155", "#E2E8F0"),
+    "row_even":     ("#FFFFFF", "#1E293B"),
+    "row_odd":      ("#F8FAFC", "#24324E"),
+    "row_hover":    ("#EFF6FF", "#2C3D61"),
+    "row_sel":      ("#DBEAFE", "#1D4ED8"),
+    "row_sel_fg":   ("#1D4ED8", "#FFFFFF"),
+    "row_error":    ("#FEF2F2", "#4C1D1D"),
+    "row_error_fg": ("#DC2626", "#FCA5A5"),
+}
+
+MAX_HISTORY = 80          # 撤销栈上限，防止内存无限增长
+CACHE_DEBOUNCE_MS = 800   # 缓存写入防抖间隔
 
 
 class CustomDnDTk(ctk.CTk, TkinterDnD.DnDWrapper):
@@ -24,17 +58,23 @@ class CustomDnDTk(ctk.CTk, TkinterDnD.DnDWrapper):
 class SeatShufflerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("班级排座系统 V1.0")
-        self.root.geometry("1150x760")
-        self.root.minsize(900, 600)
+        self.root.title("Smart Seat Shuffler · 智能班级排座系统")
+        self.root.geometry("1180x780")
+        self.root.minsize(920, 620)
+        self.root.configure(fg_color=PALETTE["bg"])
 
         self.root.attributes("-alpha", 0.0)
         self.fade_in()
 
         self.df = None
         self.current_sort_state = "未导入数据"
-        self.history_stack = []
+        self.history_stack = deque(maxlen=MAX_HISTORY)
         self.current_frame_name = "home"
+
+        self._cache_job = None
+        self._hover_iid = None
+        self._loading_dots = 0
+        self._loading_base_text = ""
 
         # --- 默认配置参数 ---
         self.config_file = "settings.json"
@@ -119,25 +159,13 @@ class SeatShufflerApp:
 
         # 绑定快捷键
         self.bind_shortcuts()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ==================== 核心独立滚动引擎 ====================
-    def _scroll_x(self, event):
-        import sys
-        delta = -event.delta if sys.platform in ["darwin", "apple"] else -int(event.delta / 120)
-        if delta > 3:
-            delta = 3
-        elif delta < -3:
-            delta = -3
-
-        speed = int(self.scroll_speed)
-        self.action_scroll_frame._parent_canvas.xview_scroll(int(delta * speed), "units")
-        return "break"
-
+    # ==================== 核心滚动引擎 ====================
     def apply_y_smooth(self, frame):
         frame._parent_canvas.configure(yscrollincrement=1)
 
         def _custom_y(event):
-            import sys
             delta = -event.delta if sys.platform in ["darwin", "apple"] else -int(event.delta / 120)
             if delta > 3:
                 delta = 3
@@ -203,43 +231,47 @@ class SeatShufflerApp:
         logger.addHandler(fh)
 
     def build_sidebar(self):
-        self.sidebar_frame = ctk.CTkFrame(self.root, width=220, corner_radius=0, fg_color=("#E5E7EB", "#1F1F1F"))
+        self.sidebar_frame = ctk.CTkFrame(self.root, width=228, corner_radius=0, fg_color=PALETTE["sidebar"])
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(5, weight=1)
+        self.sidebar_frame.grid_rowconfigure(4, weight=1)
 
-        # 【修复 Logo 对齐】：精细微调文字框架的 pady，让文字与帽子的光学中心绝对对齐
         logo_frame = ctk.CTkFrame(self.sidebar_frame, fg_color="transparent")
-        logo_frame.grid(row=0, column=0, padx=20, pady=(35, 25), sticky="ew")
+        logo_frame.grid(row=0, column=0, padx=22, pady=(32, 24), sticky="ew")
 
-        icon_label = ctk.CTkLabel(logo_frame, text="🎓", font=("Microsoft YaHei", 42))
-        icon_label.pack(side="left", padx=(5, 10))
+        icon_label = ctk.CTkLabel(logo_frame, text="🎓", font=("Microsoft YaHei", 32))
+        icon_label.pack(side="left", padx=(2, 12))
 
         text_frame = ctk.CTkFrame(logo_frame, fg_color="transparent")
-        text_frame.pack(side="left", fill="y", expand=True, pady=(5, 0))  # 增加顶部内边距，压低文字高度
+        text_frame.pack(side="left", fill="y", expand=True)
 
         ctk.CTkLabel(text_frame, text="排座系统", font=("Microsoft YaHei UI", 20, "bold"),
-                     text_color=("#111827", "#F9FAFB")).pack(anchor="w")
+                     text_color=PALETTE["text"]).pack(anchor="w")
         ctk.CTkLabel(text_frame, text="Smart Seating", font=("Arial", 11, "bold"),
-                     text_color=("#6B7280", "#9CA3AF")).pack(anchor="w", pady=(0, 0))
-
-        # =========================================================================
+                     text_color=PALETTE["text_3"]).pack(anchor="w", pady=(2, 0))
 
         def create_nav_btn(row, text, name):
-            btn = ctk.CTkButton(self.sidebar_frame, text=text, corner_radius=10, height=45, border_spacing=10,
-                                text_color=("#333333", "#DCE4EE"), fg_color="transparent",
-                                hover_color=("#D1D5DB", "#333333"), anchor="w",
-                                font=("Microsoft YaHei", 14, "bold"),
+            btn = ctk.CTkButton(self.sidebar_frame, text=text, corner_radius=9, height=44, border_spacing=12,
+                                text_color=PALETTE["text_2"], fg_color="transparent",
+                                hover_color=PALETTE["card_soft"], anchor="w",
+                                font=("Microsoft YaHei", 14, "bold"), cursor="hand2",
                                 command=lambda: self.select_frame_by_name(name))
-            btn.grid(row=row, column=0, sticky="ew", padx=15, pady=5)
+            btn.grid(row=row, column=0, sticky="ew", padx=18, pady=5)
             return btn
 
         self.btn_nav_home = create_nav_btn(1, "📊  控制台", "home")
         self.btn_nav_settings = create_nav_btn(2, "⚙️  偏好设置", "settings")
         self.btn_nav_help = create_nav_btn(3, "❓  帮助与关于", "help")
 
-        ctk.CTkLabel(self.sidebar_frame, text="Version 1.0", font=("Arial", 11), text_color="gray").grid(row=6,
-                                                                                                              column=0,
-                                                                                                              pady=20)
+        ctk.CTkLabel(self.sidebar_frame, text="Version 1.0", font=("Arial", 11),
+                     text_color=PALETTE["text_3"]).grid(row=5, column=0, pady=22)
+
+    def _set_nav_active(self, btn, active):
+        if active:
+            btn.configure(fg_color=PALETTE["primary_soft"], text_color=PALETTE["primary"],
+                          hover_color=PALETTE["primary_soft"])
+        else:
+            btn.configure(fg_color="transparent", text_color=PALETTE["text_2"],
+                          hover_color=PALETTE["card_soft"])
 
     def select_frame_by_name(self, name):
         if self.current_frame_name == "settings" and name != "settings":
@@ -255,9 +287,9 @@ class SeatShufflerApp:
 
         self.current_frame_name = name
 
-        self.btn_nav_home.configure(fg_color=("#FFFFFF", "#2B2B2B") if name == "home" else "transparent")
-        self.btn_nav_settings.configure(fg_color=("#FFFFFF", "#2B2B2B") if name == "settings" else "transparent")
-        self.btn_nav_help.configure(fg_color=("#FFFFFF", "#2B2B2B") if name == "help" else "transparent")
+        self._set_nav_active(self.btn_nav_home, name == "home")
+        self._set_nav_active(self.btn_nav_settings, name == "settings")
+        self._set_nav_active(self.btn_nav_help, name == "help")
 
         if name == "home":
             self.settings_frame.pack_forget()
@@ -276,101 +308,107 @@ class SeatShufflerApp:
     # ==================== 构建主界面 ====================
     def build_main_ui(self):
         header = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        header.pack(fill="x", padx=30, pady=(25, 15))
-        ctk.CTkLabel(header, text="主控制台", font=("Microsoft YaHei UI", 24, "bold"),
-                     text_color=("#111827", "#F9FAFB")).pack(side="left")
+        header.pack(fill="x", padx=32, pady=(24, 6))
 
-        actions_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        actions_frame.pack(fill="x", padx=30, pady=5)
+        title_box = ctk.CTkFrame(header, fg_color="transparent")
+        title_box.pack(side="left")
+        ctk.CTkLabel(title_box, text="主控制台", font=("Microsoft YaHei UI", 26, "bold"),
+                     text_color=PALETTE["text"]).pack(anchor="w")
+        ctk.CTkLabel(title_box, text="导入名单 · 随机排座 · 一键导出", font=("Microsoft YaHei", 13),
+                     text_color=PALETTE["text_2"]).pack(anchor="w", pady=(3, 0))
 
-        self.action_scroll_frame = ctk.CTkScrollableFrame(actions_frame, orientation="horizontal", corner_radius=12,
-                                                          fg_color=("#FFFFFF", "#2B2B2B"), height=80)
-        self.action_scroll_frame.pack(fill="x", expand=True)
+        self.status_badge = ctk.CTkLabel(header, text="  未导入数据  ", font=("Microsoft YaHei", 12, "bold"),
+                                         fg_color=PALETTE["card_soft"], text_color=PALETTE["text_2"],
+                                         corner_radius=15, height=30)
+        self.status_badge.pack(side="right", pady=(14, 0))
 
-        self.action_scroll_frame._parent_canvas.configure(xscrollincrement=1)
-        self.action_scroll_frame.bind("<MouseWheel>", self._scroll_x)
-        self.action_scroll_frame._parent_canvas.bind("<MouseWheel>", self._scroll_x)
+        self.action_card = ctk.CTkFrame(self.main_frame, corner_radius=14, fg_color=PALETTE["card"])
+        self.action_card.pack(fill="x", padx=32, pady=(10, 0))
 
-        def create_action_btn(parent, text, color_style, command):
+        self.row_core = ctk.CTkFrame(self.action_card, fg_color="transparent")
+        self.row_tools = ctk.CTkFrame(self.action_card, fg_color="transparent")
+
+        def create_action_btn(parent, text, color_style, command, large):
             styles = {
-                "primary": {"fg": "#1f538d", "hover": "#14375e", "txt": "white"},
-                "secondary": {"fg": ("#F3F4F6", "#374151"), "hover": ("#E5E7EB", "#4B5563"),
-                              "txt": ("#111827", "#F9FAFB")},
-                "success": {"fg": "#2FA572", "hover": "#106A43", "txt": "white"},
-                "danger": {"fg": ("#FEF2F2", "#3F1616"), "hover": ("#FEE2E2", "#5C1A1A"), "txt": ("#DC2626", "#F87171")}
+                "primary": {"fg": PALETTE["primary"], "hover": PALETTE["primary_hv"], "txt": ("#FFFFFF", "#FFFFFF")},
+                "secondary": {"fg": PALETTE["card_soft"], "hover": PALETTE["border"], "txt": PALETTE["text"]},
+                "success": {"fg": PALETTE["success"], "hover": PALETTE["success_hv"], "txt": ("#FFFFFF", "#FFFFFF")},
+                "danger": {"fg": PALETTE["danger_soft"], "hover": ("#FEE2E2", "#5C2020"), "txt": PALETTE["danger"]}
             }
             c = styles[color_style]
 
-            btn = ctk.CTkButton(parent, text=text, command=command, font=("Microsoft YaHei", 14, "bold"),
-                                fg_color=c["fg"], hover_color=c["hover"], text_color=c["txt"],
-                                corner_radius=10, height=45, width=135, cursor="hand2")
+            return ctk.CTkButton(parent, text=text, command=command, cursor="hand2",
+                                 font=("Microsoft YaHei", 14 if large else 13, "bold"),
+                                 fg_color=c["fg"], hover_color=c["hover"], text_color=c["txt"],
+                                 corner_radius=10, height=48 if large else 40)
 
-            btn.bind("<MouseWheel>", self._scroll_x)
-            if hasattr(btn, '_canvas'): btn._canvas.bind("<MouseWheel>", self._scroll_x)
-            if hasattr(btn, '_text_label'): btn._text_label.bind("<MouseWheel>", self._scroll_x)
-
-            return btn
-
-        self.btn_download = create_action_btn(self.action_scroll_frame, "📥 模板", "secondary", self.download_template)
-        self.btn_upload = create_action_btn(self.action_scroll_frame, "📁 导入", "primary", self.upload_file)
-        self.btn_export = create_action_btn(self.action_scroll_frame, "💾 导出", "success", self.export_file)
-        self.btn_shuffle = create_action_btn(self.action_scroll_frame, "🎲 随机打乱", "primary", self.shuffle_seats)
-        self.btn_undo = create_action_btn(self.action_scroll_frame, "⬅️ 撤销", "secondary", self.undo)
-        self.btn_sort_seat = create_action_btn(self.action_scroll_frame, "🔢 座位排序", "secondary", self.sort_by_seat)
-        self.btn_sort_info = create_action_btn(self.action_scroll_frame, "📝 学号排序", "secondary", self.sort_by_info)
-        self.btn_reset = create_action_btn(self.action_scroll_frame, "🗑️ 重置", "danger", self.reset_data)
+        self.btn_upload = create_action_btn(self.row_core, "📁 导入名单", "primary", self.upload_file, True)
+        self.btn_shuffle = create_action_btn(self.row_core, "🎲 随机打乱", "primary", self.shuffle_seats, True)
+        self.btn_export = create_action_btn(self.row_core, "💾 导出表格", "success", self.export_file, True)
+        self.btn_download = create_action_btn(self.row_tools, "📥 模板", "secondary", self.download_template, False)
+        self.btn_undo = create_action_btn(self.row_tools, "⬅️ 撤销", "secondary", self.undo, False)
+        self.btn_sort_seat = create_action_btn(self.row_tools, "🔢 座位排序", "secondary", self.sort_by_seat, False)
+        self.btn_sort_info = create_action_btn(self.row_tools, "📝 学号排序", "secondary", self.sort_by_info, False)
+        self.btn_reset = create_action_btn(self.row_tools, "🗑️ 重置", "danger", self.reset_data, False)
 
         self.refresh_button_layout()
 
-        sf = ctk.CTkFrame(self.main_frame, corner_radius=12, fg_color=("#F3F4F6", "#212121"))
-        sf.pack(fill="x", padx=30, pady=15)
+        sf = ctk.CTkFrame(self.main_frame, corner_radius=14, fg_color=PALETTE["card"])
+        sf.pack(fill="x", padx=32, pady=14)
 
-        isf = ctk.CTkFrame(sf, fg_color="transparent")
-        isf.pack(pady=12, padx=20, fill="x")
+        grid = ctk.CTkFrame(sf, fg_color="transparent")
+        grid.pack(pady=14, padx=22, fill="x")
+        grid.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(isf, text="座位起止范围:", font=("Microsoft YaHei", 13, "bold"),
-                     text_color=("#374151", "#D1D5DB")).pack(side="left", padx=(0, 10))
-        self.start_seat_entry = ctk.CTkEntry(isf, width=65, corner_radius=6, justify="center",
-                                             border_color=("#D1D5DB", "#4B5563"))
+        ctk.CTkLabel(grid, text="座位范围", font=("Microsoft YaHei", 13, "bold"),
+                     text_color=PALETTE["text_2"]).grid(row=0, column=0, sticky="w", pady=7, padx=(0, 16))
+
+        range_box = ctk.CTkFrame(grid, fg_color="transparent")
+        range_box.grid(row=0, column=1, sticky="w")
+        self.start_seat_entry = ctk.CTkEntry(range_box, width=72, height=34, corner_radius=8, justify="center",
+                                             border_color=PALETTE["border"])
         self.start_seat_entry.pack(side="left")
-        ctk.CTkLabel(isf, text="—", font=("Microsoft YaHei", 12)).pack(side="left", padx=8)
-        self.end_seat_entry = ctk.CTkEntry(isf, width=65, corner_radius=6, justify="center",
-                                           border_color=("#D1D5DB", "#4B5563"))
+        ctk.CTkLabel(range_box, text="—", font=("Microsoft YaHei", 12),
+                     text_color=PALETTE["text_3"]).pack(side="left", padx=8)
+        self.end_seat_entry = ctk.CTkEntry(range_box, width=72, height=34, corner_radius=8, justify="center",
+                                           border_color=PALETTE["border"])
         self.end_seat_entry.pack(side="left")
 
         self.is_compact_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(isf, text="紧凑模式 (无缝补齐)", variable=self.is_compact_var, font=("Microsoft YaHei", 12),
-                        border_color=("#9CA3AF", "#6B7280"), checkbox_width=20, checkbox_height=20,
-                        hover_color="#3498db").pack(side="left", padx=(25, 30))
+        ctk.CTkCheckBox(range_box, text="紧凑模式 (无缝补齐)", variable=self.is_compact_var,
+                        font=("Microsoft YaHei", 12), text_color=PALETTE["text_2"],
+                        border_color=PALETTE["border"], checkbox_width=20, checkbox_height=20,
+                        hover_color=PALETTE["primary"]).pack(side="left", padx=(24, 0))
 
-        ctk.CTkLabel(isf, text="⚠️ 排除座位 (如坏电脑):", font=("Microsoft YaHei", 13, "bold"),
-                     text_color="#DC2626").pack(side="left", padx=(0, 10))
-        self.excluded_seats_entry = ctk.CTkEntry(isf, width=180, corner_radius=6, placeholder_text="例如: 12, 15",
-                                                 border_color=("#D1D5DB", "#4B5563"))
-        self.excluded_seats_entry.pack(side="left")
+        ctk.CTkLabel(grid, text="排除座位", font=("Microsoft YaHei", 13, "bold"),
+                     text_color=PALETTE["text_2"]).grid(row=1, column=0, sticky="w", pady=7, padx=(0, 16))
+        self.excluded_seats_entry = ctk.CTkEntry(grid, height=34, corner_radius=8,
+                                                 placeholder_text="选填 · 损坏的座位号，多个用逗号分隔，如: 12, 15",
+                                                 border_color=PALETTE["border"])
+        self.excluded_seats_entry.grid(row=1, column=1, sticky="ew")
 
-        tc = ctk.CTkFrame(self.main_frame, corner_radius=12, fg_color=("#FFFFFF", "#2B2B2B"))
-        tc.pack(fill="both", expand=True, padx=30, pady=(0, 25))
+        tc = ctk.CTkFrame(self.main_frame, corner_radius=14, fg_color=PALETTE["card"])
+        tc.pack(fill="both", expand=True, padx=32, pady=(0, 8))
 
         self.tree = ttk.Treeview(tc, columns=("班级", "学号", "姓名", "座位号"), show="headings")
-        scrollbar = ctk.CTkScrollbar(tc, orientation="vertical", command=self.tree.yview)
+        scrollbar = ctk.CTkScrollbar(tc, orientation="vertical", command=self.tree.yview,
+                                     button_color=PALETTE["border"], button_hover_color=PALETTE["text_3"])
         self.tree.configure(yscroll=scrollbar.set)
 
-        # 【完美消除表格白边与错位】：增加容器内边距，避免直角表格盖住圆角背景
-        scrollbar.pack(side="right", fill="y", padx=(0, 15), pady=15)
-        self.tree.pack(side="left", fill="both", expand=True, padx=(15, 5), pady=15)
+        scrollbar.pack(side="right", fill="y", padx=(0, 16), pady=16)
+        self.tree.pack(side="left", fill="both", expand=True, padx=(16, 5), pady=16)
 
-        # 【完美对齐表头与数据】：显式声明列的居中属性和合理宽度
-        self.tree.column("班级", width=150, anchor="center")
-        self.tree.column("学号", width=250, anchor="center")
-        self.tree.column("姓名", width=200, anchor="center")
-        self.tree.column("座位号", width=150, anchor="center")
+        self.tree.column("班级", width=120, anchor="center", stretch=True)
+        self.tree.column("学号", width=180, anchor="center", stretch=True)
+        self.tree.column("姓名", width=160, anchor="center", stretch=True)
+        self.tree.column("座位号", width=120, anchor="center", stretch=True)
 
         self.tree.bind('<Double-1>', self.on_tree_double_click)
+        self.tree.bind('<Motion>', self._on_tree_hover)
+        self.tree.bind('<Leave>', self._on_tree_leave)
 
         def _tree_scroll(event):
-            import sys
-            if sys.platform == "darwin" or sys.platform == "apple":
+            if sys.platform in ["darwin", "apple"]:
                 delta = -event.delta
             else:
                 delta = -int(event.delta / 120)
@@ -384,30 +422,59 @@ class SeatShufflerApp:
 
         self.tree.bind("<MouseWheel>", _tree_scroll)
 
+        status_bar = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        status_bar.pack(fill="x", padx=36, pady=(0, 14))
+        self.status_label = ctk.CTkLabel(status_bar, text="未导入数据 — 点击「导入」或将 Excel 文件拖入窗口",
+                                         font=("Microsoft YaHei", 12), text_color=PALETTE["text_3"], anchor="w")
+        self.status_label.pack(side="left")
+        ctk.CTkLabel(status_bar, text="Smart Seat Shuffler v1.0", font=("Arial", 11),
+                     text_color=PALETTE["text_3"]).pack(side="right")
+
         self.refresh_tree_headings()
         self.root.drop_target_register(DND_FILES)
         self.root.dnd_bind('<<Drop>>', self.handle_drop)
 
     def build_loading_overlay(self):
-        self.loading_frame = ctk.CTkFrame(self.root, fg_color=("#E5E7EB", "#1A1A1A"), corner_radius=15, border_width=1,
-                                          border_color="#D1D5DB")
-        self.loading_label = ctk.CTkLabel(self.loading_frame, text="⌛ 正在处理中，请稍候...",
-                                          font=("Microsoft YaHei", 16, "bold"), text_color=("#111827", "#F9FAFB"))
-        self.loading_label.pack(padx=50, pady=(30, 15))
-        self.loading_progress = ctk.CTkProgressBar(self.loading_frame, mode="indeterminate", width=220, height=8,
-                                                   fg_color=("#D1D5DB", "#374151"), progress_color="#1f538d")
-        self.loading_progress.pack(padx=50, pady=(0, 30))
+        self.loading_mask = ctk.CTkFrame(self.root, fg_color=("#D9E2EC", "#0A1120"), corner_radius=0)
+        self.loading_card = ctk.CTkFrame(self.loading_mask, corner_radius=20, fg_color=PALETTE["card"],
+                                         border_width=1, border_color=PALETTE["border"])
+        self.loading_card.place(relx=0.5, rely=0.5, anchor="center")
+        self.loading_label = ctk.CTkLabel(self.loading_card, text="正在处理中，请稍候",
+                                          font=("Microsoft YaHei", 16, "bold"), text_color=PALETTE["text"])
+        self.loading_label.pack(padx=64, pady=(34, 14))
+        self.loading_progress = ctk.CTkProgressBar(self.loading_card, mode="indeterminate", width=240, height=8,
+                                                   fg_color=PALETTE["border"], progress_color=PALETTE["primary"])
+        self.loading_progress.pack(padx=64, pady=(0, 34))
 
-    def show_loading(self, text="⌛ 正在处理中，请稍候..."):
+    def show_loading(self, text="正在处理中，请稍候"):
+        self._loading_base_text = text
         self.loading_label.configure(text=text)
-        self.loading_frame.place(relx=0.5, rely=0.5, anchor="center")
-        self.loading_frame.lift()
+        self.loading_mask.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.loading_mask.lift()
         self.loading_progress.start()
         self.root.update_idletasks()
+        self._animate_loading_dots()
+
+    def _animate_loading_dots(self):
+        if not self.loading_mask.winfo_ismapped():
+            return
+        self._loading_dots = (self._loading_dots + 1) % 4
+        self.loading_label.configure(text=f"{self._loading_base_text} {'·' * self._loading_dots}")
+        self.root.after(400, self._animate_loading_dots)
 
     def hide_loading(self):
         self.loading_progress.stop()
-        self.loading_frame.place_forget()
+        self.loading_mask.place_forget()
+
+    def _on_close(self):
+        if self._cache_job is not None:
+            try:
+                self.root.after_cancel(self._cache_job)
+            except Exception:
+                pass
+            self._cache_job = None
+            self._flush_cache_now()
+        self.root.destroy()
 
     def _recheck_errors(self):
         if self.df is not None and not self.df.empty:
@@ -451,7 +518,7 @@ class SeatShufflerApp:
                 actual_df_index = self.df.index[row_index]
 
                 if str(self.df.at[actual_df_index, col_name]) != new_value:
-                    self.history_stack.append(self.df.copy())
+                    self._push_history()
                     self.df.at[actual_df_index, col_name] = new_value
             except Exception:
                 pass
@@ -464,72 +531,88 @@ class SeatShufflerApp:
         entry.bind('<FocusOut>', lambda e: entry.destroy())
 
     def refresh_button_layout(self):
-        for btn in [self.btn_download, self.btn_upload, self.btn_export, self.btn_shuffle,
-                    self.btn_undo, self.btn_sort_seat, self.btn_sort_info, self.btn_reset]:
-            btn.pack_forget()
+        all_btns = [self.btn_download, self.btn_upload, self.btn_export, self.btn_shuffle,
+                    self.btn_undo, self.btn_sort_seat, self.btn_sort_info, self.btn_reset]
+        for btn in all_btns:
+            btn.grid_forget()
 
-        if self.show_download:
-            self.btn_download.pack(side="left", padx=8, pady=5)
-        if self.show_upload:
-            self.btn_upload.pack(side="left", padx=8, pady=5)
-        if self.show_export:
-            self.btn_export.pack(side="left", padx=8, pady=5)
-        if self.show_shuffle:
-            self.btn_shuffle.pack(side="left", padx=8, pady=5)
-        if self.show_undo:
-            self.btn_undo.pack(side="left", padx=8, pady=5)
-        if self.show_sort_seat:
-            self.btn_sort_seat.pack(side="left", padx=8, pady=5)
-        if self.show_sort_info:
-            self.btn_sort_info.pack(side="left", padx=8, pady=5)
-        if self.show_reset:
-            self.btn_reset.pack(side="left", padx=8, pady=5)
+        core = [b for b, on in [(self.btn_upload, self.show_upload), (self.btn_shuffle, self.show_shuffle),
+                                (self.btn_export, self.show_export)] if on]
+        tools = [b for b, on in [(self.btn_download, self.show_download), (self.btn_undo, self.show_undo),
+                                 (self.btn_sort_seat, self.show_sort_seat),
+                                 (self.btn_sort_info, self.show_sort_info),
+                                 (self.btn_reset, self.show_reset)] if on]
+
+        self.row_core.pack_forget()
+        self.row_tools.pack_forget()
+
+        if core:
+            for i in range(3):
+                self.row_core.columnconfigure(i, weight=1, uniform="core")
+            for i, btn in enumerate(core):
+                btn.grid(row=0, column=i, padx=6, sticky="ew")
+        if tools:
+            for i in range(5):
+                self.row_tools.columnconfigure(i, weight=1, uniform="tools")
+            for i, btn in enumerate(tools):
+                btn.grid(row=0, column=i, padx=6, sticky="ew")
+
+        if core and tools:
+            self.row_core.pack(fill="x", padx=14, pady=(14, 8))
+            self.row_tools.pack(fill="x", padx=14, pady=(0, 14))
+        elif core:
+            self.row_core.pack(fill="x", padx=14, pady=14)
+        elif tools:
+            self.row_tools.pack(fill="x", padx=14, pady=14)
 
     def update_treeview_style(self):
         mode = ctk.get_appearance_mode()
+        idx = 1 if mode == "Dark" else 0
         style = ttk.Style()
         style.theme_use("default")
 
-        if mode == "Dark":
-            style.configure("Treeview", font=("Microsoft YaHei", 12), rowheight=40, borderwidth=0, relief="flat",
-                            background="#2B2B2B", fieldbackground="#2B2B2B", foreground="#E0E0E0")
-            style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 13, "bold"),
-                            background="#1F1F1F", foreground="#E0E0E0", borderwidth=0, padding=10)
-            style.map("Treeview", background=[("selected", "#1F538D")], foreground=[("selected", "#FFFFFF")])
-            self.tree.tag_configure('evenrow', background='#2B2B2B')
-            self.tree.tag_configure('oddrow', background='#333333')
-            self.tree.tag_configure('errorrow', background='#5C1A1A', foreground='#FFB4B4')
-        else:
-            style.configure("Treeview", font=("Microsoft YaHei", 12), rowheight=40, borderwidth=0, relief="flat",
-                            background="#FFFFFF", fieldbackground="#FFFFFF", foreground="#333333")
-            style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 13, "bold"),
-                            background="#F4F6F9", foreground="#333333", borderwidth=0, padding=10)
-            style.map("Treeview", background=[("selected", "#E2ECF6")], foreground=[("selected", "#111827")])
-            self.tree.tag_configure('evenrow', background='#FFFFFF')
-            self.tree.tag_configure('oddrow', background='#F9FAFB')
-            self.tree.tag_configure('errorrow', background='#FEE2E2', foreground='#DC2626')
+        style.configure("Treeview", font=("Microsoft YaHei", 12), rowheight=42, borderwidth=0, relief="flat",
+                        background=PALETTE["row_even"][idx], fieldbackground=PALETTE["row_even"][idx],
+                        foreground=PALETTE["row_fg"][idx])
+        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 12, "bold"),
+                        background=PALETTE["card_soft"][idx], foreground=PALETTE["text_2"][idx],
+                        borderwidth=0, padding=12)
+        style.map("Treeview",
+                  background=[("selected", PALETTE["row_sel"][idx])],
+                  foreground=[("selected", PALETTE["row_sel_fg"][idx])])
+        self.tree.tag_configure('evenrow', background=PALETTE["row_even"][idx])
+        self.tree.tag_configure('oddrow', background=PALETTE["row_odd"][idx])
+        self.tree.tag_configure('hoverrow', background=PALETTE["row_hover"][idx])
+        self.tree.tag_configure('errorrow', background=PALETTE["row_error"][idx],
+                                foreground=PALETTE["row_error_fg"][idx])
 
     # ==================== 构建设置界面 ====================
     def build_settings_ui(self):
         header = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
-        header.pack(fill="x", padx=30, pady=(25, 10))
-        ctk.CTkLabel(header, text="系统偏好设置", font=("Microsoft YaHei UI", 24, "bold"),
-                     text_color=("#111827", "#F9FAFB")).pack(side="left")
+        header.pack(fill="x", padx=32, pady=(24, 10))
+        title_box = ctk.CTkFrame(header, fg_color="transparent")
+        title_box.pack(side="left")
+        ctk.CTkLabel(title_box, text="系统偏好设置", font=("Microsoft YaHei UI", 26, "bold"),
+                     text_color=PALETTE["text"]).pack(anchor="w")
+        ctk.CTkLabel(title_box, text="外观 · 快捷键 · 数据安全 · 导出排版", font=("Microsoft YaHei", 13),
+                     text_color=PALETTE["text_2"]).pack(anchor="w", pady=(3, 0))
 
         action_f = ctk.CTkFrame(header, fg_color="transparent")
         action_f.pack(side="right")
         ctk.CTkButton(action_f, text="恢复默认", command=self.reset_default_settings, width=100, height=36,
                       corner_radius=18,
-                      fg_color="transparent", border_width=1.5, text_color=("#374151", "#D1D5DB"),
-                      hover_color=("#E5E7EB", "#4B5563"), font=("Microsoft YaHei", 13, "bold"), cursor="hand2").pack(
+                      fg_color="transparent", border_width=1.5, border_color=PALETTE["border"],
+                      text_color=PALETTE["text_2"],
+                      hover_color=PALETTE["card_soft"], font=("Microsoft YaHei", 13, "bold"), cursor="hand2").pack(
             side="left", padx=10)
         ctk.CTkButton(action_f, text="保存设置", command=self.save_settings_action, width=120, height=36,
                       corner_radius=18,
-                      fg_color="#1f538d", hover_color="#14375e", font=("Microsoft YaHei", 13, "bold"),
+                      fg_color=PALETTE["primary"], hover_color=PALETTE["primary_hv"],
+                      font=("Microsoft YaHei", 13, "bold"),
                       cursor="hand2").pack(side="left")
 
         self.settings_scroll_frame = ctk.CTkScrollableFrame(self.settings_frame, fg_color="transparent")
-        self.settings_scroll_frame.pack(fill="both", expand=True, padx=30, pady=5)
+        self.settings_scroll_frame.pack(fill="both", expand=True, padx=(30, 38), pady=5)
         self.apply_y_smooth(self.settings_scroll_frame)
 
         self.backup_var = ctk.BooleanVar(value=self.auto_backup)
@@ -571,10 +654,11 @@ class SeatShufflerApp:
         self.var_show_reset = ctk.BooleanVar(value=self.show_reset)
 
         def create_setting_card(title, icon=""):
-            card = ctk.CTkFrame(self.settings_scroll_frame, corner_radius=12, fg_color=("#FFFFFF", "#2B2B2B"))
-            card.pack(fill="x", pady=(0, 20))
+            card = ctk.CTkFrame(self.settings_scroll_frame, corner_radius=14, fg_color=PALETTE["card"],
+                                border_width=1, border_color=PALETTE["border"])
+            card.pack(fill="x", pady=(0, 18))
             ctk.CTkLabel(card, text=f"{icon} {title}", font=("Microsoft YaHei", 15, "bold"),
-                         text_color=("#111827", "#F9FAFB")).pack(anchor="w", padx=25, pady=(15, 10))
+                         text_color=PALETTE["text"]).pack(anchor="w", padx=25, pady=(16, 10))
             return card
 
         # 1. 外观主题与交互 (恢复自然流式排版，不再死板)
@@ -592,11 +676,12 @@ class SeatShufflerApp:
         ctk.CTkSegmentedButton(r_ui_1, values=["明亮", "跟随系统", "暗黑"],
                                variable=self.theme_var, command=on_theme_change,
                                font=("Microsoft YaHei", 13, "bold"),
-                               selected_color="#1f538d", selected_hover_color="#14375e").pack(side="left")
+                               selected_color=PALETTE["primary"],
+                               selected_hover_color=PALETTE["primary_hv"]).pack(side="left")
 
         r_ui_2 = ctk.CTkFrame(ui_card, fg_color="transparent")
         r_ui_2.pack(fill="x", padx=35, pady=(0, 20))
-        ctk.CTkLabel(r_ui_2, text="横向滚动速度:", font=("Microsoft YaHei", 13, "bold")).pack(side="left", padx=(0, 15))
+        ctk.CTkLabel(r_ui_2, text="滚动速度:", font=("Microsoft YaHei", 13, "bold")).pack(side="left", padx=(0, 15))
         ctk.CTkComboBox(r_ui_2, values=["10", "20", "30", "50", "80", "120", "150", "200"],
                         variable=self.scroll_speed_var,
                         font=("Microsoft YaHei", 12), width=105, corner_radius=8).pack(side="left")
@@ -636,12 +721,15 @@ class SeatShufflerApp:
             ("按学号排序", self.var_show_sort_info), ("重置数据", self.var_show_reset)
         ]
 
+        for c in range(4):
+            t_grid.grid_columnconfigure(c, weight=1, uniform="sw")
+
         for idx, (text, var) in enumerate(toggles):
             r = idx // 4
             c = idx % 4
             sw = ctk.CTkSwitch(t_grid, text=text, variable=var, font=("Microsoft YaHei", 13, "bold"),
                                switch_width=38, switch_height=20)
-            sw.grid(row=r, column=c, padx=(0, 30), pady=12, sticky="w")
+            sw.grid(row=r, column=c, padx=8, pady=12, sticky="w")
 
         # 4. 数据与目录配置
         data_card = create_setting_card("数据与目录配置", "🗂️")
@@ -654,22 +742,24 @@ class SeatShufflerApp:
         path_grid.pack(fill="x", padx=35, pady=(0, 20))
 
         def add_path_row(parent, row_idx, label, var, open_cmd, clear_cmd, clear_text):
+            parent.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(parent, text=label, width=70, anchor="w", font=("Microsoft YaHei", 13, "bold")).grid(
                 row=row_idx, column=0, pady=8, sticky="w")
-            ctk.CTkEntry(parent, textvariable=var, state="readonly", width=320, font=("Microsoft YaHei", 12)).grid(
-                row=row_idx, column=1, padx=10, pady=8, sticky="w")
+            ctk.CTkEntry(parent, textvariable=var, state="readonly", font=("Microsoft YaHei", 12)).grid(
+                row=row_idx, column=1, padx=10, pady=8, sticky="ew")
 
-            ctk.CTkButton(parent, text="浏览", width=60, fg_color=("#E5E7EB", "#4B5563"), font=("Microsoft YaHei", 12),
-                          text_color=("#111827", "#F9FAFB"), hover_color=("#D1D5DB", "#6B7280"), cursor="hand2",
+            ctk.CTkButton(parent, text="浏览", width=60, fg_color=PALETTE["card_soft"], font=("Microsoft YaHei", 12),
+                          text_color=PALETTE["text"], hover_color=PALETTE["border"], cursor="hand2",
                           command=lambda: var.set(filedialog.askdirectory() or var.get())).grid(row=row_idx, column=2,
                                                                                                 padx=(0, 5), pady=8)
 
-            ctk.CTkButton(parent, text="打开", width=60, fg_color="#1f538d", font=("Microsoft YaHei", 12),
+            ctk.CTkButton(parent, text="打开", width=60, fg_color=PALETTE["primary"],
+                          hover_color=PALETTE["primary_hv"], font=("Microsoft YaHei", 12),
                           cursor="hand2", command=open_cmd).grid(row=row_idx, column=3, padx=5, pady=8)
 
             ctk.CTkButton(parent, text=clear_text, width=85, height=32, corner_radius=16, fg_color="transparent",
-                          border_width=1.5, border_color="#DC2626", text_color="#DC2626",
-                          hover_color=("#FEE2E2", "#5c1a1a"),
+                          border_width=1.5, border_color=PALETTE["border"], text_color=PALETTE["text_2"],
+                          hover_color=PALETTE["danger_soft"],
                           font=("Microsoft YaHei", 12, "bold"), cursor="hand2", command=clear_cmd).grid(row=row_idx,
                                                                                                         column=4,
                                                                                                         padx=5, pady=8)
@@ -699,16 +789,16 @@ class SeatShufflerApp:
 
         left_lbl_f = ctk.CTkFrame(row2, fg_color="transparent")
         left_lbl_f.pack(side="left", padx=(10, 5), pady=(25, 0))
-        ctk.CTkLabel(left_lbl_f, text="表头名称", font=("Microsoft YaHei", 13, "bold"), text_color="gray",
+        ctk.CTkLabel(left_lbl_f, text="表头名称", font=("Microsoft YaHei", 13, "bold"), text_color=PALETTE["text_3"],
                      height=30).pack(pady=(0, 5))
-        ctk.CTkLabel(left_lbl_f, text="列宽设定", font=("Microsoft YaHei", 13, "bold"), text_color="gray",
+        ctk.CTkLabel(left_lbl_f, text="列宽设定", font=("Microsoft YaHei", 13, "bold"), text_color=PALETTE["text_3"],
                      height=30).pack()
 
         labels = ["列A(序号)", "列B(班级)", "列C(学号)", "列D(姓名)", "列E(座位)"]
         for i, l in enumerate(labels):
             f = ctk.CTkFrame(row2, fg_color="transparent")
             f.pack(side="left", padx=8, expand=True, fill="x")
-            ctk.CTkLabel(f, text=l, font=("Microsoft YaHei", 13, "bold"), text_color=("#4B5563", "#9CA3AF")).pack(
+            ctk.CTkLabel(f, text=l, font=("Microsoft YaHei", 13, "bold"), text_color=PALETTE["text_2"]).pack(
                 pady=(0, 5))
             ctk.CTkEntry(f, textvariable=self.name_vars[i], justify="center", font=("Microsoft YaHei", 12),
                          height=30).pack(fill="x", pady=(0, 5))
@@ -877,9 +967,13 @@ class SeatShufflerApp:
 
     def build_help_ui(self):
         header = ctk.CTkFrame(self.help_frame, fg_color="transparent")
-        header.pack(fill="x", padx=30, pady=(25, 10))
-        ctk.CTkLabel(header, text="帮助与说明", font=("Microsoft YaHei UI", 24, "bold"),
-                     text_color=("#111827", "#F9FAFB")).pack(side="left")
+        header.pack(fill="x", padx=32, pady=(24, 10))
+        title_box = ctk.CTkFrame(header, fg_color="transparent")
+        title_box.pack(side="left")
+        ctk.CTkLabel(title_box, text="帮助与说明", font=("Microsoft YaHei UI", 26, "bold"),
+                     text_color=PALETTE["text"]).pack(anchor="w")
+        ctk.CTkLabel(title_box, text="功能指南 · 个性化定制 · 数据安全", font=("Microsoft YaHei", 13),
+                     text_color=PALETTE["text_2"]).pack(anchor="w", pady=(3, 0))
 
         self.help_scroll_frame = ctk.CTkScrollableFrame(self.help_frame, fg_color="transparent")
         self.help_scroll_frame.pack(fill="both", expand=True, padx=30, pady=(5, 20))
@@ -887,19 +981,20 @@ class SeatShufflerApp:
         self.apply_y_smooth(self.help_scroll_frame)
 
         def create_help_card(title, icon, title_color):
-            card = ctk.CTkFrame(self.help_scroll_frame, corner_radius=12, fg_color=("#FFFFFF", "#2B2B2B"),
-                                border_width=1, border_color=("#E5E7EB", "#374151"))
-            card.pack(fill="x", pady=(0, 20), ipadx=10, ipady=10)
+            card = ctk.CTkFrame(self.help_scroll_frame, corner_radius=14, fg_color=PALETTE["card"],
+                                border_width=1, border_color=PALETTE["border"])
+            card.pack(fill="x", pady=(0, 16), ipadx=8, ipady=8)
 
             header_frame = ctk.CTkFrame(card, fg_color="transparent")
-            header_frame.pack(fill="x", padx=25, pady=(15, 5))
+            header_frame.pack(fill="x", padx=28, pady=(14, 5))
 
-            ctk.CTkLabel(header_frame, text=icon, font=("Microsoft YaHei UI", 22)).pack(side="left", padx=(0, 10))
+            ctk.CTkLabel(header_frame, text=icon, font=("Microsoft YaHei UI", 22)).pack(side="left", padx=(0, 10),
+                                                                                        pady=(3, 0))
             ctk.CTkLabel(header_frame, text=title, font=("Microsoft YaHei UI", 16, "bold"),
                          text_color=title_color).pack(side="left")
 
             content_frame = ctk.CTkFrame(card, fg_color="transparent")
-            content_frame.pack(fill="both", expand=True, padx=45, pady=(0, 15))
+            content_frame.pack(fill="both", expand=True, padx=28, pady=(0, 14))
             return content_frame
 
         def add_bullet_text(parent, bold_title, text):
@@ -909,17 +1004,17 @@ class SeatShufflerApp:
 
             if bold_title:
                 title_lbl = ctk.CTkLabel(row, text=f"• {bold_title}：", font=("Microsoft YaHei", 14, "bold"),
-                                         text_color=("#111827", "#E5E7EB"))
+                                         text_color=PALETTE["text"])
                 title_lbl.grid(row=0, column=0, sticky="nw")
-                desc_lbl = ctk.CTkLabel(row, text=text, font=("Microsoft YaHei", 14), text_color=("#4B5563", "#9CA3AF"),
-                                        justify="left", wraplength=600)
+                desc_lbl = ctk.CTkLabel(row, text=text, font=("Microsoft YaHei", 14), text_color=PALETTE["text_2"],
+                                        justify="left", wraplength=760)
                 desc_lbl.grid(row=0, column=1, sticky="nw", padx=(5, 0))
             else:
                 desc_lbl = ctk.CTkLabel(row, text=f"• {text}", font=("Microsoft YaHei", 14),
-                                        text_color=("#4B5563", "#9CA3AF"), justify="left", wraplength=700)
+                                        text_color=PALETTE["text_2"], justify="left", wraplength=820)
                 desc_lbl.grid(row=0, column=0, columnspan=2, sticky="nw")
 
-        card1 = create_help_card("核心功能指南", "🚀", "#1f538d")
+        card1 = create_help_card("核心功能指南", "🚀", "#2563EB")
         add_bullet_text(card1, "准备数据", "点击【下载模板】获取标准格式，或直接将您的 Excel 名单拖拽至软件界面。")
         add_bullet_text(card1, "智能排座",
                         "在【座位起止范围】输入号码（如 1 至 50）。如果机房有坏电脑，可在【排除座位】中填入（如：12, 15）。")
@@ -928,7 +1023,7 @@ class SeatShufflerApp:
                         "系统会自动识别空姓名、重复学号等异常并标红显示，双击任意单元格即可直接修改。")
         add_bullet_text(card1, "导出名单", "点击【导出表格】或使用快捷键，系统会自动按您的排版设置生成美观的 Excel 文件。")
 
-        card2 = create_help_card("高级个性化定制", "🎨", "#2FA572")
+        card2 = create_help_card("高级个性化定制", "🎨", "#059669")
         add_bullet_text(card2, "快捷键支持",
                         "支持在设置中自定义修饰键 (如 Control/Alt/Shift) + 字母键的组合（如撤销、导出、打乱），解放双手。")
         add_bullet_text(card2, "界面极简", "在【偏好设置】中，您可以自由隐藏不需要的按钮，打造专注的工作流。")
@@ -1031,14 +1126,32 @@ class SeatShufflerApp:
             self.setup_logger()
             messagebox.showinfo("成功", "日志已清空！")
 
+    def _push_history(self):
+        self.history_stack.append(self.df.copy())
+
     def save_to_cache(self):
-        if self.df is not None and not self.df.empty:
+        if self.df is None or self.df.empty:
+            return
+        if self._cache_job is not None:
             try:
-                os.makedirs(self.cache_path, exist_ok=True)
-                df_cache = self.df.copy().drop(columns=["_error"], errors='ignore')
-                df_cache.to_excel(os.path.join(self.cache_path, "实时数据缓存.xlsx"), index=False)
+                self.root.after_cancel(self._cache_job)
             except Exception:
                 pass
+        self._cache_job = self.root.after(CACHE_DEBOUNCE_MS, self._do_save_cache)
+
+    def _do_save_cache(self):
+        self._cache_job = None
+        self._flush_cache_now()
+
+    def _flush_cache_now(self):
+        if self.df is None or self.df.empty:
+            return
+        try:
+            os.makedirs(self.cache_path, exist_ok=True)
+            df_cache = self.df.copy().drop(columns=["_error"], errors='ignore')
+            df_cache.to_excel(os.path.join(self.cache_path, "实时数据缓存.xlsx"), index=False)
+        except Exception:
+            pass
 
     def undo(self, event=None):
         if not self.history_stack:
@@ -1122,7 +1235,6 @@ class SeatShufflerApp:
     def shuffle_seats(self, event=None):
         if self.df is None or self.df.empty:
             return
-        self.history_stack.append(self.df.copy())
         try:
             total = len(self.df)
             start = int(self.start_seat_entry.get() or 1)
@@ -1146,6 +1258,7 @@ class SeatShufflerApp:
                 if len(valid) < total:
                     messagebox.showerror("错误", "除去排除的座位后，总座位不足！")
                     return
+            self._push_history()
             self.df["座位号"] = random.sample(valid, total)
             self.current_sort_state = "已随机打乱"
             self.update_treeview()
@@ -1155,15 +1268,15 @@ class SeatShufflerApp:
     def sort_by_seat(self):
         if self.df is None or self.df.empty:
             return
-        self.history_stack.append(self.df.copy())
-        self.df = self.df.sort_values("座位号")
+        self._push_history()
+        self.df = self.df.sort_values("座位号", key=lambda s: pd.to_numeric(s, errors="coerce"), na_position="last")
         self.current_sort_state = "按座位排序"
         self.update_treeview()
 
     def sort_by_info(self):
         if self.df is None or self.df.empty:
             return
-        self.history_stack.append(self.df.copy())
+        self._push_history()
         self.df = self.df.sort_values(["班级", "学号"])
         self.current_sort_state = "按学号排序"
         self.update_treeview()
@@ -1226,16 +1339,48 @@ class SeatShufflerApp:
             self.history_stack.clear()
             self.update_treeview()
 
+    def refresh_status(self):
+        if self.df is None or self.df.empty:
+            text, color = "未导入数据 — 点击「导入」或将 Excel 文件拖入窗口", PALETTE["text_3"]
+        else:
+            err_count = int(self.df["_error"].sum()) if "_error" in self.df.columns else 0
+            text = f"共 {len(self.df)} 名学生 · {self.current_sort_state}"
+            if err_count:
+                text += f" · {err_count} 条数据待修正"
+                color = PALETTE["warn"]
+            else:
+                color = PALETTE["success"]
+        self.status_label.configure(text=text, text_color=color)
+        self.status_badge.configure(text=f"  {self.current_sort_state}  ")
+
+    def _on_tree_hover(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid == self._hover_iid:
+            return
+        if self._hover_iid and self.tree.exists(self._hover_iid):
+            tags = tuple(t for t in self.tree.item(self._hover_iid, "tags") if t != "hoverrow")
+            self.tree.item(self._hover_iid, tags=tags)
+        self._hover_iid = iid
+        if iid:
+            self.tree.item(iid, tags=tuple(self.tree.item(iid, "tags")) + ("hoverrow",))
+
+    def _on_tree_leave(self, event):
+        if self._hover_iid and self.tree.exists(self._hover_iid):
+            tags = tuple(t for t in self.tree.item(self._hover_iid, "tags") if t != "hoverrow")
+            self.tree.item(self._hover_iid, tags=tags)
+        self._hover_iid = None
+
     def update_treeview(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
+        self._hover_iid = None
         if self.df is not None:
-            for i, (_, r) in enumerate(self.df.iterrows()):
-                if r.get('_error', False):
-                    tag = 'errorrow'
-                else:
-                    tag = 'evenrow' if i % 2 == 0 else 'oddrow'
+            records = self.df.to_dict("records")
+            for i, r in enumerate(records):
+                tag = "errorrow" if r.get("_error", False) else ("evenrow" if i % 2 == 0 else "oddrow")
                 self.tree.insert("", "end", values=(r["班级"], r["学号"], r["姓名"], r["座位号"]), tags=(tag,))
+        self.refresh_status()
         self.save_to_cache()
 
 

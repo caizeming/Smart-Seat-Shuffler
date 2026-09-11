@@ -1,0 +1,10 @@
+# 运行时产物
+settings.json
+备份文件夹/
+缓存文件夹/
+日志文件夹/
+__pycache__/
+
+# 虚拟环境
+.venv/
+venv/
