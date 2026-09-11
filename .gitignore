@@ -8,3 +8,8 @@ __pycache__/
 # 虚拟环境
 .venv/
 venv/
+
+# PyInstaller 打包产物
+build/
+dist/
+*.spec
