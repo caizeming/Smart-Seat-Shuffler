@@ -1,5 +1,6 @@
 import sys
 import tkinter as tk
+APP_VERSION = "1.1"
 from tkinter import filedialog, messagebox, ttk
 import customtkinter as ctk
 import pandas as pd
@@ -262,7 +263,7 @@ class SeatShufflerApp:
         self.btn_nav_settings = create_nav_btn(2, "⚙️  偏好设置", "settings")
         self.btn_nav_help = create_nav_btn(3, "❓  帮助与关于", "help")
 
-        ctk.CTkLabel(self.sidebar_frame, text="Version 1.1", font=("Arial", 11),
+        ctk.CTkLabel(self.sidebar_frame, text=f"Version {APP_VERSION}", font=("Arial", 11),
                      text_color=PALETTE["text_3"]).grid(row=5, column=0, pady=22)
 
     def _set_nav_active(self, btn, active):
@@ -427,7 +428,7 @@ class SeatShufflerApp:
         self.status_label = ctk.CTkLabel(status_bar, text="未导入数据 — 点击「导入」或将 Excel 文件拖入窗口",
                                          font=("Microsoft YaHei", 12), text_color=PALETTE["text_3"], anchor="w")
         self.status_label.pack(side="left")
-        ctk.CTkLabel(status_bar, text="Smart Seat Shuffler v1.0", font=("Arial", 11),
+        ctk.CTkLabel(status_bar, text=f"Smart Seat Shuffler v{APP_VERSION}", font=("Arial", 11),
                      text_color=PALETTE["text_3"]).pack(side="right")
 
         self.refresh_tree_headings()
@@ -1035,8 +1036,8 @@ class SeatShufflerApp:
         add_bullet_text(card3, "自动备份", "每次成功导出表格，系统都会在备份库中悄悄留存一份快照，做到有迹可循。")
 
         card4 = create_help_card("关于系统", "ℹ️", "#6B7280")
-        add_bullet_text(card4, "当前版本", "Version 1.0 ")
-        add_bullet_text(card4, "版权声明", "本项目禁止商用，后续会考虑在GitHub上开源")
+        add_bullet_text(card4, "当前版本", f"Version {APP_VERSION}")
+        add_bullet_text(card4, "版权声明", "本项目已在 GitHub 开源（CC BY-NC 4.0 许可证），仅供学习与教育使用，禁止商用")
         add_bullet_text(card4, "问题反馈", "如发现 bug 或有功能建议，欢迎联系开发者邮箱serein1346790@gmail.com ")
 
     def refresh_tree_headings(self):
