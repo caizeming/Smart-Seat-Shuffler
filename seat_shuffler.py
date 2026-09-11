@@ -262,7 +262,7 @@ class SeatShufflerApp:
         self.btn_nav_settings = create_nav_btn(2, "⚙️  偏好设置", "settings")
         self.btn_nav_help = create_nav_btn(3, "❓  帮助与关于", "help")
 
-        ctk.CTkLabel(self.sidebar_frame, text="Version 1.0", font=("Arial", 11),
+        ctk.CTkLabel(self.sidebar_frame, text="Version 1.1", font=("Arial", 11),
                      text_color=PALETTE["text_3"]).grid(row=5, column=0, pady=22)
 
     def _set_nav_active(self, btn, active):
